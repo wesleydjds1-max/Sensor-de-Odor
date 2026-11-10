@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Monitoramento de Odor IoT — ESP32 & MQ-137</title>
+  <!-- Tailwind CSS via CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MQTT.js via CDN -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <!-- Chart.js via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0b0f19;
+      color: #f1f5f9;
+    }
+    .mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .card-glass {
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    @keyframes pulse-alert {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.45); }
+      50% { box-shadow: 0 0 0 12px rgba(239, 68, 68, 0); }
+    }
+    .alert-glow {
+      animation: pulse-alert 2s infinite;
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col selection:bg-cyan-500 selection:text-white">
+
+  <!-- Top Header -->
+  <header class="border-b border-slate-800/80 bg-slate-900/70 backdrop-blur sticky top-0 z-30">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+          <i data-lucide="wind" class="w-6 h-6 text-white"></i>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-lg sm:text-xl font-bold tracking-tight text-white">Dashboard Sensor de Odor (MQ-137)</h1>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 font-medium">ESP32 IoT</span>
+          </div>
+          <p class="text-xs text-slate-400">Monitoramento em tempo real via MQTT & armazenamento local persistente</p>
+        </div>
+      </div>
+
+      <!-- Connection Pill & Quick Actions -->
+      <div class="flex flex-wrap items-center gap-2.5">
+        <div id="mqttStatusBadge" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium">
+          <span id="mqttDot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping"></span>
+          <span id="mqttStatusText">Conectando ao HiveMQ...</span>
+        </div>
+
+        <button onclick="simulateReading()" title="Gera uma leitura de teste para testar gráficos e tabela sem o ESP32"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition">
+          <i data-lucide="sparkles" class="w-3.5 h-3.5 text-cyan-400"></i>
+          Simular Leitura
+        </button>
+
+        <button onclick="exportCSV()" title="Baixar planilha compatível com Excel"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition">
+          <i data-lucide="download" class="w-3.5 h-3.5"></i>
+          Exportar CSV / Excel
+        </button>
+
+        <button onclick="toggleConfigModal()" title="Configurar Tópico MQTT"
+          class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition">
+          <i data-lucide="settings" class="w-4 h-4"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 flex-1 space-y-6">
+
+    <!-- Real-time KPI Row -->
+    <section class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      
+      <!-- Card 1: Odor Intensity (%) -->
+      <div id="intensityCard" class="card-glass rounded-2xl p-5 flex flex-col justify-between transition-all duration-300">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Intensidade do Odor</span>
+          <div class="p-2 rounded-lg bg-cyan-500/10 text-cyan-400">
+            <i data-lucide="gauge" class="w-5 h-5"></i>
+          </div>
+        </div>
+        <div class="my-3 flex items-baseline gap-2">
+          <span id="valIntensity" class="text-4xl font-extrabold mono text-white">--</span>
+          <span class="text-lg font-semibold text-slate-400">%</span>
+        </div>
+        <div>
+          <div class="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden">
+            <div id="barIntensity" class="h-full bg-emerald-500 transition-all duration-500 rounded-full" style="width: 0%"></div>
+          </div>
+          <div class="flex justify-between text-[11px] text-slate-500 mt-1.5">
+            <span>0% (Ar Limpo)</span>
+            <span>40%</span>
+            <span>70%</span>
+            <span>100%</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Card 2: Environment Status -->
+      <div id="statusCard" class="card-glass rounded-2xl p-5 flex flex-col justify-between transition-all duration-300">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Status do Ambiente</span>
+          <div id="statusIconBox" class="p-2 rounded-lg bg-slate-800 text-slate-400">
+            <i data-lucide="shield-check" class="w-5 h-5"></i>
+          </div>
+        </div>
+        <div class="my-3">
+          <div id="valStatusBadge" class="inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-bold bg-slate-800 text-slate-300">
+            Aguardando dados...
+          </div>
+          <p id="valStatusDesc" class="text-xs text-slate-400 mt-2">
+            Assim que o ESP32 publicar no MQTT, o diagnóstico aparecerá aqui.
+          </p>
+        </div>
+        <div class="text-[11px] text-slate-500 flex items-center justify-between border-t border-slate-800/80 pt-2">
+          <span>Dispositivo: <strong id="valDevice" class="text-slate-300 mono">---</strong></span>
+          <span id="valLastTime">--:--:--</span>
+        </div>
+      </div>
+
+      <!-- Card 3: Raw ADC & Voltage (D34) -->
+      <div class="card-glass rounded-2xl p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Leitura Elétrica (Pino D34)</span>
+          <div class="p-2 rounded-lg bg-purple-500/10 text-purple-400">
+            <i data-lucide="cpu" class="w-5 h-5"></i>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3 my-3">
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-3">
+            <span class="text-[11px] text-slate-400 block">Valor ADC (12-bit)</span>
+            <span id="valAdc" class="text-2xl font-bold mono text-purple-300">--</span>
+            <span class="text-[10px] text-slate-500 block">de 4095</span>
+          </div>
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-3">
+            <span class="text-[11px] text-slate-400 block">Tensão Calculada</span>
+            <div class="flex items-baseline gap-1">
+              <span id="valVoltage" class="text-2xl font-bold mono text-cyan-300">--</span>
+              <span class="text-xs text-slate-400 mono">V</span>
+            </div>
+            <span class="text-[10px] text-slate-500 block">máx 3.30 V</span>
+          </div>
+        </div>
+        <div class="text-[11px] text-slate-500 flex justify-between">
+          <span>Esquema: <strong class="text-slate-300">3 Fios Direto (3.3V)</strong></span>
+          <span>Sem divisor</span>
+        </div>
+      </div>
+
+      <!-- Card 4: Storage & Statistics -->
+      <div class="card-glass rounded-2xl p-5 flex flex-col justify-between">
+        <div class="flex items-center justify-between">
+          <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Banco de Dados Local</span>
+          <div class="p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
+            <i data-lucide="database" class="w-5 h-5"></i>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 my-3 text-center">
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-2.5">
+            <span class="text-[10px] text-slate-400 block">Salvos</span>
+            <span id="statTotal" class="text-lg font-bold mono text-white">0</span>
+          </div>
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-2.5">
+            <span class="text-[10px] text-slate-400 block">Média</span>
+            <span id="statAvg" class="text-lg font-bold mono text-cyan-300">0%</span>
+          </div>
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-2.5">
+            <span class="text-[10px] text-slate-400 block">Pico Máx</span>
+            <span id="statMax" class="text-lg font-bold mono text-rose-400">0%</span>
+          </div>
+        </div>
+        <div class="text-[11px] text-slate-500 flex items-center justify-between border-t border-slate-800/80 pt-2">
+          <span class="flex items-center gap-1 text-emerald-400">
+            <i data-lucide="check-circle-2" class="w-3.5 h-3.5"></i> Salvo no navegador
+          </span>
+          <span id="statAlerts" class="text-rose-400 font-medium">0 alertas</span>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Chart Section -->
+    <section class="card-glass rounded-2xl p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2 mb-4">
+        <div>
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <i data-lucide="activity" class="w-4 h-4 text-cyan-400"></i>
+            Curva de Intensidade de Amônia / Odor em Tempo Real
+          </h2>
+          <p class="text-xs text-slate-400">Exibindo as últimas 30 leituras armazenadas</p>
+        </div>
+        <div class="flex items-center gap-4 text-xs">
+          <span class="flex items-center gap-1.5 text-slate-300">
+            <span class="w-3 h-1 rounded bg-cyan-400 inline-block"></span> Intensidade (%)
+          </span>
+          <span class="flex items-center gap-1.5 text-slate-300">
+            <span class="w-3 h-1 rounded bg-purple-400 inline-block"></span> Tensão (V)
+          </span>
+        </div>
+      </div>
+      <div class="h-72 w-full">
+        <canvas id="odorChart"></canvas>
+      </div>
+    </section>
+
+    <!-- Stored History Table Section -->
+    <section class="card-glass rounded-2xl p-5">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <i data-lucide="table" class="w-4 h-4 text-emerald-400"></i>
+            Histórico de Leituras Armazenadas
+          </h2>
+          <p class="text-xs text-slate-400">Os dados ficam salvos mesmo se você fechar ou atualizar a página</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- Filter by Status -->
+          <select id="filterStatus" onchange="renderTable()" class="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-1.5 focus:outline-none focus:border-cyan-500">
+            <option value="ALL">Todos os Status</option>
+            <option value="OK">Somente [OK] Normal</option>
+            <option value="ATENCAO">Somente [ATENÇÃO]</option>
+            <option value="ALERTA">Somente [ALERTA]</option>
+          </select>
+
+          <button onclick="exportJSON()" class="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs transition">
+            <i data-lucide="file-json" class="w-3.5 h-3.5 text-amber-400"></i>
+            Baixar JSON
+          </button>
+
+          <button onclick="clearHistory()" class="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-800/60 text-xs transition">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+            Limpar Banco
+          </button>
+        </div>
+      </div>
+
+      <div class="overflow-x-auto rounded-xl border border-slate-800">
+        <table class="w-full text-left border-collapse">
+          <thead>
+            <tr class="bg-slate-900/90 text-slate-400 text-xs uppercase border-b border-slate-800">
+              <th class="py-3 px-4 font-semibold">#</th>
+              <th class="py-3 px-4 font-semibold">Data e Hora</th>
+              <th class="py-3 px-4 font-semibold">Dispositivo</th>
+              <th class="py-3 px-4 font-semibold">Leitura ADC</th>
+              <th class="py-3 px-4 font-semibold">Tensão (V)</th>
+              <th class="py-3 px-4 font-semibold">Intensidade (%)</th>
+              <th class="py-3 px-4 font-semibold">Diagnóstico</th>
+            </tr>
+          </thead>
+          <tbody id="historyTableBody" class="divide-y divide-slate-800/60 text-sm">
+            <!-- Populated by JS -->
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Settings Modal -->
+  <div id="configModal" class="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+    <div class="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between">
+        <h3 class="text-base font-bold text-white flex items-center gap-2">
+          <i data-lucide="radio" class="w-5 h-5 text-cyan-400"></i>
+          Configurações de Conexão MQTT
+        </h3>
+        <button onclick="toggleConfigModal()" class="text-slate-400 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-400 mb-1">Broker WebSocket URL</label>
+          <input id="inputBroker" type="text" value="wss://broker.hivemq.com:8884/mqtt"
+            class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white mono focus:outline-none focus:border-cyan-500" />
+        </div>
+        <div>
+          <label class="block text-slate-400 mb-1">Tópico MQTT (mesmo do código do ESP32)</label>
+          <input id="inputTopic" type="text" value="projeto/sensor_odor/banheiro_01/dados"
+            class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white mono focus:outline-none focus:border-cyan-500" />
+        </div>
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="toggleConfigModal()" class="px-4 py-2 rounded-lg bg-slate-800 text-slate-300 text-xs font-medium">Cancelar</button>
+        <button onclick="saveConfigAndReconnect()" class="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold">Salvar e Reconectar</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Initialize Lucide icons
+    lucide.createIcons();
+
+    // --- Local Storage Database Key ---
+    const STORAGE_KEY = 'esp32_mq137_odor_records_v1';
+    const CONFIG_KEY = 'esp32_mq137_mqtt_config_v1';
+    const MAX_RECORDS = 5000;
+
+    let records = [];
+    let mqttClient = null;
+    let mqttConfig = {
+      brokerUrl: 'wss://broker.hivemq.com:8884/mqtt',
+      topic: 'projeto/sensor_odor/banheiro_01/dados'
+    };
+
+    // Load saved config & history
+    function loadFromStorage() {
+      try {
+        const savedCfg = localStorage.getItem(CONFIG_KEY);
+        if (savedCfg) {
+          mqttConfig = { ...mqttConfig, ...JSON.parse(savedCfg) };
+          document.getElementById('inputBroker').value = mqttConfig.brokerUrl;
+          document.getElementById('inputTopic').value = mqttConfig.topic;
+        }
+        const savedData = localStorage.getItem(STORAGE_KEY);
+        if (savedData) {
+          records = JSON.parse(savedData);
+        }
+      } catch (err) {
+        console.error('Erro ao ler localStorage:', err);
+      }
+    }
+
+    function saveToStorage() {
+      try {
+        if (records.length > MAX_RECORDS) {
+          records = records.slice(records.length - MAX_RECORDS);
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+      } catch (err) {
+        console.error('Erro ao salvar no localStorage:', err);
+      }
+    }
+
+    // Classify reading status matching the ESP32 Serial output
+    function getLevelInfo(intensity) {
+      if (intensity < 40) {
+        return {
+          code: 'OK',
+          label: '[OK] Ambiente Normal',
+          desc: 'Qualidade do ar dentro dos padrões esperados.',
+          color: 'emerald',
+          barClass: 'bg-emerald-500',
+          badgeClass: 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+        };
+      } else if (intensity < 70) {
+        return {
+          code: 'ATENCAO',
+          label: '[ATENÇÃO] Odor Aumentando',
+          desc: 'Nível moderado de amônia/gases detectado. Recomenda-se ventilação.',
+          color: 'amber',
+          barClass: 'bg-amber-500',
+          badgeClass: 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+        };
+      } else {
+        return {
+          code: 'ALERTA',
+          label: '[ALERTA] Odor Forte Detectado!',
+          desc: 'Alta concentração detectada! Necessária higienização imediata.',
+          color: 'rose',
+          barClass: 'bg-rose-500',
+          badgeClass: 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+        };
+      }
+    }
+
+    // --- Chart.js Setup ---
+    const ctx = document.getElementById('odorChart').getContext('2d');
+    const odorChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'Intensidade (%)',
+            data: [],
+            borderColor: '#22d3ee',
+            backgroundColor: 'rgba(34, 211, 238, 0.12)',
+            borderWidth: 2.5,
+            pointRadius: 3,
+            pointBackgroundColor: '#22d3ee',
+            fill: true,
+            tension: 0.35,
+            yAxisID: 'y'
+          },
+          {
+            label: 'Tensão (V)',
+            data: [],
+            borderColor: '#c084fc',
+            backgroundColor: 'transparent',
+            borderWidth: 2,
+            borderDash: [5, 5],
+            pointRadius: 2,
+            tension: 0.35,
+            yAxisID: 'y1'
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#0f172a',
+            borderColor: '#334155',
+            borderWidth: 1,
+            titleColor: '#f8fafc',
+            bodyColor: '#cbd5e1'
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#64748b', maxRotation: 0, autoSkip: true, maxTicksLimit: 10 },
+            grid: { color: 'rgba(255, 255, 255, 0.04)' }
+          },
+          y: {
+            type: 'linear',
+            display: true,
+            position: 'left',
+            min: 0,
+            max: 100,
+            ticks: { color: '#22d3ee', callback: (v) => v + '%' },
+            grid: { color: 'rgba(255, 255, 255, 0.06)' }
+          },
+          y1: {
+            type: 'linear',
+            display: true,
+            position: 'right',
+            min: 0,
+            max: 3.3,
+            ticks: { color: '#c084fc', callback: (v) => v.toFixed(1) + 'V' },
+            grid: { drawOnChartArea: false }
+          }
+        }
+      }
+    });
+
+    // --- Record New Reading ---
+    function handleIncomingPayload(payloadObj) {
+      const now = new Date();
+      const rawAdc = Number(payloadObj.raw_adc ?? 0);
+      const voltage = parseFloat(payloadObj.voltage_v ?? ((rawAdc / 4095) * 3.3));
+      const intensity = Math.min(100, Math.max(0, Math.round(Number(payloadObj.intensity_percent ?? ((rawAdc / 4095) * 100)))));
+      const deviceId = String(payloadObj.device_id || 'esp32_sensor_odor_01');
+      const level = getLevelInfo(intensity);
+
+      const entry = {
+        id: Date.now() + Math.floor(Math.random() * 1000),
+        isoDate: now.toISOString(),
+        dateStr: now.toLocaleDateString('pt-BR'),
+        timeStr: now.toLocaleTimeString('pt-BR'),
+        device_id: deviceId,
+        raw_adc: rawAdc,
+        voltage_v: Number(voltage.toFixed(2)),
+        intensity_percent: intensity,
+        level_code: level.code,
+        level_label: level.label
+      };
+
+      records.push(entry);
+      saveToStorage();
+      updateDashboardUI(entry);
+    }
+
+    // --- Update UI Cards, Chart, and Table ---
+    function updateDashboardUI(latestEntry) {
+      const entry = latestEntry || records[records.length - 1];
+
+      if (entry) {
+        const level = getLevelInfo(entry.intensity_percent);
+
+        document.getElementById('valIntensity').textContent = entry.intensity_percent;
+        const bar = document.getElementById('barIntensity');
+        bar.style.width = `${entry.intensity_percent}%`;
+        bar.className = `h-full transition-all duration-500 rounded-full ${level.barClass}`;
+
+        const badge = document.getElementById('valStatusBadge');
+        badge.textContent = level.label;
+        badge.className = `inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-bold ${level.badgeClass}`;
+
+        document.getElementById('valStatusDesc').textContent = level.desc;
+        document.getElementById('valDevice').textContent = entry.device_id;
+        document.getElementById('valLastTime').textContent = entry.timeStr;
+        document.getElementById('valAdc').textContent = entry.raw_adc;
+        document.getElementById('valVoltage').textContent = Number(entry.voltage_v).toFixed(2);
+
+        const statusCard = document.getElementById('statusCard');
+        if (level.code === 'ALERTA') {
+          statusCard.classList.add('alert-glow', 'border-rose-500/50');
+        } else {
+          statusCard.classList.remove('alert-glow', 'border-rose-500/50');
+        }
+      } else {
+        // Estado inicial limpo (sem leituras)
+        document.getElementById('valIntensity').textContent = '--';
+        const bar = document.getElementById('barIntensity');
+        bar.style.width = '0%';
+        bar.className = 'h-full bg-emerald-500 transition-all duration-500 rounded-full';
+
+        const badge = document.getElementById('valStatusBadge');
+        badge.textContent = 'Aguardando dados...';
+        badge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-bold bg-slate-800 text-slate-300';
+
+        document.getElementById('valStatusDesc').textContent = 'Assim que o ESP32 publicar no MQTT, o diagnóstico aparecerá aqui.';
+        document.getElementById('valDevice').textContent = '---';
+        document.getElementById('valLastTime').textContent = '--:--:--';
+        document.getElementById('valAdc').textContent = '--';
+        document.getElementById('valVoltage').textContent = '--';
+
+        const statusCard = document.getElementById('statusCard');
+        statusCard.classList.remove('alert-glow', 'border-rose-500/50');
+      }
+
+      // Update Statistics
+      const total = records.length;
+      document.getElementById('statTotal').textContent = total;
+      if (total > 0) {
+        const sum = records.reduce((acc, r) => acc + r.intensity_percent, 0);
+        const max = records.reduce((acc, r) => Math.max(acc, r.intensity_percent), 0);
+        const alerts = records.filter(r => r.level_code === 'ALERTA').length;
+        document.getElementById('statAvg').textContent = Math.round(sum / total) + '%';
+        document.getElementById('statMax').textContent = max + '%';
+        document.getElementById('statAlerts').textContent = `${alerts} alerta${alerts === 1 ? '' : 's'}`;
+      } else {
+        document.getElementById('statAvg').textContent = '0%';
+        document.getElementById('statMax').textContent = '0%';
+        document.getElementById('statAlerts').textContent = '0 alertas';
+      }
+
+      // Update Chart (last 30 points)
+      const recent = records.slice(-30);
+      odorChart.data.labels = recent.map(r => r.timeStr);
+      odorChart.data.datasets[0].data = recent.map(r => r.intensity_percent);
+      odorChart.data.datasets[1].data = recent.map(r => r.voltage_v);
+      odorChart.update();
+
+      // Update Table
+      renderTable();
+    }
+
+    function renderTable() {
+      const tbody = document.getElementById('historyTableBody');
+      const filter = document.getElementById('filterStatus').value;
+
+      const filtered = records.filter(r => filter === 'ALL' ? true : r.level_code === filter);
+      const displayRows = filtered.slice().reverse().slice(0, 100); // Show latest 100 in UI for speed
+
+      if (displayRows.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="7" class="py-10 text-center text-slate-500 text-sm">
+              Nenhuma leitura armazenada ainda. Ligue o ESP32 ou clique em <strong>"Simular Leitura"</strong> no topo.
+            </td>
+          </tr>
+        `;
+        return;
+      }
+
+      tbody.innerHTML = displayRows.map((r, idx) => {
+        const level = getLevelInfo(r.intensity_percent);
+        const rowNum = filtered.length - idx;
+        return `
+          <tr class="hover:bg-slate-800/40 transition">
+            <td class="py-2.5 px-4 text-xs text-slate-500 mono">${rowNum}</td>
+            <td class="py-2.5 px-4 text-xs text-slate-300 mono">${r.dateStr} <span class="text-slate-400">${r.timeStr}</span></td>
+            <td class="py-2.5 px-4 text-xs text-slate-300 mono">${r.device_id}</td>
+            <td class="py-2.5 px-4 text-xs font-semibold text-purple-300 mono">${r.raw_adc}</td>
+            <td class="py-2.5 px-4 text-xs font-semibold text-cyan-300 mono">${Number(r.voltage_v).toFixed(2)} V</td>
+            <td class="py-2.5 px-4 text-xs font-bold text-white mono">${r.intensity_percent}%</td>
+            <td class="py-2.5 px-4">
+              <span class="inline-block px-2.5 py-0.5 rounded-full text-[11px] font-semibold ${level.badgeClass}">
+                ${level.label}
+              </span>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    // --- MQTT Connection ---
+    function connectMQTT() {
+      if (mqttClient) {
+        try { mqttClient.end(true); } catch (e) {}
+      }
+
+      setMqttStatus('CONNECTING', `Conectando ao HiveMQ...`);
+
+      const clientId = 'web_dashboard_' + Math.random().toString(16).substring(2, 10);
+      mqttClient = mqtt.connect(mqttConfig.brokerUrl, {
+        clientId,
+        clean: true,
+        connectTimeout: 8000,
+        reconnectPeriod: 4000
+      });
+
+      mqttClient.on('connect', () => {
+        mqttClient.subscribe(mqttConfig.topic, (err) => {
+          if (!err) {
+            setMqttStatus('CONNECTED', `Conectado (${mqttConfig.topic})`);
+          } else {
+            setMqttStatus('ERROR', 'Erro ao assinar tópico');
+          }
+        });
+      });
+
+      mqttClient.on('message', (topic, message) => {
+        try {
+          const payload = JSON.parse(message.toString());
+          handleIncomingPayload(payload);
+        } catch (err) {
+          console.warn('Mensagem MQTT recebida fora do formato JSON:', message.toString());
+        }
+      });
+
+      mqttClient.on('reconnect', () => {
+        setMqttStatus('CONNECTING', 'Reconectando ao HiveMQ...');
+      });
+
+      mqttClient.on('error', (err) => {
+        console.error('Erro MQTT:', err);
+        setMqttStatus('ERROR', 'Falha na conexão MQTT');
+      });
+    }
+
+    function setMqttStatus(state, text) {
+      const badge = document.getElementById('mqttStatusBadge');
+      const dot = document.getElementById('mqttDot');
+      const label = document.getElementById('mqttStatusText');
+      label.textContent = text;
+
+      if (state === 'CONNECTED') {
+        badge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium';
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400';
+      } else if (state === 'CONNECTING') {
+        badge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-medium';
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping';
+      } else {
+        badge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-medium';
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-rose-400';
+      }
+    }
+
+    // --- Simulate Reading (for testing & presentation backup) ---
+    function simulateReading() {
+      const sampleAdc = Math.floor(Math.random() * 3600) + 300;
+      const sampleVoltage = (sampleAdc / 4095.0) * 3.3;
+      const sampleIntensity = Math.round((sampleAdc / 4095.0) * 100);
+
+      handleIncomingPayload({
+        device_id: 'esp32_sensor_odor_01',
+        raw_adc: sampleAdc,
+        voltage_v: sampleVoltage.toFixed(2),
+        intensity_percent: sampleIntensity,
+        sensor_status: 'OK'
+      });
+    }
+
+    // --- Export CSV (Excel friendly with UTF-8 BOM & semicolon separator) ---
+    function exportCSV() {
+      if (records.length === 0) {
+        alert('Ainda não há leituras salvas para exportar.');
+        return;
+      }
+
+      const headers = ['ID', 'Data', 'Hora', 'Dispositivo', 'Leitura_ADC', 'Tensao_V', 'Intensidade_Porcentagem', 'Status'];
+      const rows = records.map((r, i) => [
+        i + 1,
+        r.dateStr,
+        r.timeStr,
+        r.device_id,
+        r.raw_adc,
+        String(r.voltage_v).replace('.', ','),
+        r.intensity_percent,
+        `"${r.level_label}"`
+      ]);
+
+      const csvContent = '\uFEFF' + [headers.join(';'), ...rows.map(e => e.join(';'))].join('\r\n');
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `historico_sensor_odor_${new Date().toISOString().slice(0, 10)}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    // --- Export JSON ---
+    function exportJSON() {
+      if (records.length === 0) {
+        alert('Ainda não há leituras salvas para exportar.');
+        return;
+      }
+      const blob = new Blob([JSON.stringify(records, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `historico_sensor_odor_${new Date().toISOString().slice(0, 10)}.json`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+
+    // --- Clear Stored History ---
+    function clearHistory() {
+      if (confirm('Tem certeza que deseja apagar todo o histórico salvo no navegador?')) {
+        records = [];
+        saveToStorage();
+        document.getElementById('filterStatus').value = 'ALL';
+        updateDashboardUI(null);
+      }
+    }
+
+    // --- Config Modal ---
+    function toggleConfigModal() {
+      const modal = document.getElementById('configModal');
+      modal.classList.toggle('hidden');
+      modal.classList.toggle('flex');
+    }
+
+    function saveConfigAndReconnect() {
+      mqttConfig.brokerUrl = document.getElementById('inputBroker').value.trim();
+      mqttConfig.topic = document.getElementById('inputTopic').value.trim();
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(mqttConfig));
+      toggleConfigModal();
+      connectMQTT();
+    }
+
+    // --- Initialize on Page Load ---
+    loadFromStorage();
+    updateDashboardUI(null);
+    connectMQTT();
+  </script>
+</body>
+</html>
